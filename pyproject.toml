@@ -1,0 +1,27 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "azb-client"
+authors = [
+    {name = "Alex Socarras", email = "apsocarras@gmail.com"},
+]
+readme = "README.md"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+]
+requires-python = ">=3.8"
+dynamic = ["version", "description"]
+
+dependencies = [
+    "azure-storage-blob"
+    ]
+
+[project.optional-dependencies]
+test = [
+    "pytest >=2.7.3",
+    "pytest-cov",
+    "python-dotenv"
+]
+doc = ["sphinx"]
