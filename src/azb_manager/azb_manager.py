@@ -1,6 +1,8 @@
-from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas, BlobContainerClient, BlobContentInfo, BlobClient
+from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas, ContainerClient, BlobClient
 import os
+from functools import wraps
 import datetime as dt 
+import re
 from typing_extensions import TypedDict
 import json 
 from io import BytesIO
@@ -15,18 +17,18 @@ class AzureBlobContainerManager:
             container (str): Name of a containers in the storage account. 
             download_dir (Optional[str]): Optional default directory to download files to. 
         """
-        self.container_client = BlobContainerClient.from_connection_string(connection_str, container_name)
         self.container_name = container_name
+        self.container_client = ContainerClient.from_connection_string(conn_str=connection_str, container_name=self.container_name)
         self.download_dir = download_dir 
 
-    def list_blobs(self, include_tags=False) -> list: 
+    def list_blobs(self, name_only=False) -> list: 
         """Wrapper to list blobs in the container (Default to just blob names)"""
 
         blob_list = self.container_client.list_blobs()
-        if include_tags:
+        if not name_only:
             return [{'name':{blob.name}, "tags":blob.tags} for blob in blob_list] 
         else: 
-            return [{'name':{blob.name}} for blob in blob_list] 
+            return [blob.name for blob in blob_list] 
         
     def get_blob_url(self, file_name:str, include_sas=False, expiry_hours=1) -> str:
         """Get the url of a blob in the container""" 
@@ -63,7 +65,7 @@ class AzureBlobContainerManager:
 
         return os.path.basename(file_name) in self.list_blobs(name_only=True) 
     
-    def download_blob(self, blob_name:str, download_path=None): 
+    def download_blob_file(self, blob_name:str, download_path=None): 
         """Download a blob from the container to local storage."""
             
         blob_client = self.container_client.get_blob_client(blob_name)
@@ -77,11 +79,11 @@ class AzureBlobContainerManager:
 
         return 
     
-    def download_bytes(self, blob_name:str) -> BytesIO: 
+    def download_blob_bytes(self, blob_name:str) -> BytesIO: 
         """Download a blob from the container directly to a BytesIO Stream"""
         blob_client = self.container_client.get_blob_client(blob_name)
         blob_data = BytesIO()
-        blob_client.download_blob().download_to_stream(blob_data)
+        blob_client.download_blob().readinto(blob_data)
         blob_data.seek(0)
         return blob_data
 
@@ -133,15 +135,22 @@ class AzureBlobContainerManager:
                     raise TypeError(f"Parameter 'data' must be one of {', '.join((str(t) for t in valid_types))}")
                 else: 
                     print(f"Encoding 'data' to binary JSON before uploading")
-                    bin_data = self._encode_json(data)  
+                    bin_data = AzureBlobStorageAccountManager._encode_json(data)  
                     response = blob_client.upload_blob(bin_data, overwrite=overwrite)
             else: 
                 response = blob_client.upload_blob(data, overwrite=overwrite)
 
         return response 
 
+    @classmethod
+    def _encode_json(cls, data):
+        """Internal wrapper to encode passed data objects to binary JSON prior to uploading.""" 
+        return AzureBlobStorageAccountManager._encode_json(data)
+
+
 class AzureBlobStorageAccountManager:
     def __init__(self, 
+                 storage_account_name:str,
                  connection_str:str, 
                  containers: Optional[list] = None, 
                  download_dir: Optional[str] = "."):
@@ -153,22 +162,23 @@ class AzureBlobStorageAccountManager:
             download_dir (Optional[str]): Optional default directory to download files to. 
         """
 
-        self.blob_service_client = BlobServiceClient.from_connection_string(connection_str)
-        self._set_containers(containers)
+        self._connection_str = connection_str
+        self.blob_service_client = BlobServiceClient.from_connection_string(self._connection_str)
 
         # The default directory to which to download a blob.
         self.download_dir = download_dir
 
+        self._set_container_clients(containers)
+
         # Parse the connection string for the storage account name 
-        conn_dict = AzureBlobStorageAccountManager._parse_conn_string(connection_str) 
-        self.storage_account = conn_dict['AccountName']
+        self._storage_account = storage_account_name
 
 
     def list_containers(self, include_metadata=False) -> list: 
         """List containers in the storage account along with optional metadata
         https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blob-containers-list-python
         """
-        container_list = self.blob_service_client.list_containers
+        container_list = self.blob_service_client.list_containers()
         
         if include_metadata:
             return [{'name':c['name'], 'metadata':c['metadata']} for c in container_list] 
@@ -185,28 +195,6 @@ class AzureBlobStorageAccountManager:
         except Exception as e:  
             ## TO-DO: Handle individual error types 
             raise Exception(f"Failed to encode {data} to binary JSON ({str(e)})")
-    @classmethod
-    def _parse_conn_string(cls, conn_str:str) -> dict:
-        """Extract the storage account name from a connection string"""
-
-        expected_schema={ 
-            'DefaultEndpointsProtocol': str,
-            'AccountName': str,
-            'AccountKey': str,
-            'EndpointSuffix': str
-        }
-
-        conn_dict={}
-        for key_value in conn_str.split(";"): 
-            key, value = key_value.split('=')
-            conn_dict[key] = value 
-
-        if any(k not in expected_schema or not isinstance(k, expected_schema[k])
-               for k in conn_dict): 
-            print(f'Failed to parse connection string to expected JSON schema: \n{conn_str}\n(parsed: {conn_dict})')
-            raise ValueError('Failed to parse connection string to expected JSON schema')
-
-        return conn_dict
     
     def _set_container_clients(self, containers:Optional[list]) -> None: 
         """(Internal Helper) Get and set container clients based on container name"""
@@ -218,7 +206,7 @@ class AzureBlobStorageAccountManager:
             
             # Initialize Container Manager  
             container_manager = AzureBlobContainerManager(
-                                connection_str=self.connection_str,
+                                connection_str=self._connection_str,
                                 container_name=container_name, 
                                 download_dir=self.download_dir)
             # Set as attribute 
@@ -226,6 +214,7 @@ class AzureBlobStorageAccountManager:
 
         return
     
+
     def upload_blob(self, container_name, **kwargs) -> None: 
         """Wrapper for AzureBlobContainerManager.upload_blob(). Used in tests not to expose container name."""
         try:
@@ -234,4 +223,27 @@ class AzureBlobStorageAccountManager:
         except AttributeError: 
             raise AttributeError(f"Container '{container_name}' not set in attributes.")
         
+    def download_blob_file(self, container_name, **kwargs) -> None: 
+        """Wrapper for AzureBlobContainerManager.download_blob_file(). Used in tests not to expose container name."""
+        try:
+            container_manager = getattr(self, container_name)
+            container_manager.download_blob_file(**kwargs)
+        except AttributeError: 
+            raise AttributeError(f"Container '{container_name}' not set in attributes.")
+
+    def download_blob_bytes(self, container_name, **kwargs) -> None: 
+        """Wrapper for AzureBlobContainerManager.download_blob_bytes(). Used in tests not to expose container name."""
+        try:
+            container_manager = getattr(self, container_name)
+            container_manager.download_blob_bytes(**kwargs)
+        except AttributeError: 
+            raise AttributeError(f"Container '{container_name}' not set in attributes.")
+
+        
+    @property
+    def connection_str(self):
+        return self._connection_str
     
+    @property
+    def storage_account(self):
+        return self._storage_account
